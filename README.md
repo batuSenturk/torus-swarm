@@ -20,7 +20,7 @@ verifiers/
 
 ## Usage
 
-### Using the Router (Recommended)
+### Using the Router
 
 ```python
 from verifiers import verify
@@ -147,7 +147,3 @@ python3 test_individual_verifiers.py
 
 - `requests`: HTTP API calls
 - `python-dateutil`: Date parsing utilities
-
-## License
-
-MIT License 
