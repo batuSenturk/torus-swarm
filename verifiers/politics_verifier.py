@@ -1,11 +1,40 @@
 from typing import Dict, Any
 import logging
 import requests
+import re
 
 logger = logging.getLogger(__name__)
 
 WIKIPEDIA_API_URL = "https://en.wikipedia.org/w/api.php"
 
+
+def extract_winner_from_text(text: str):
+    """
+    Try to extract the winner(s) of an election from Wikipedia text using common patterns.
+    Returns a list of winner names (may be empty if not found).
+    """
+    text = text.lower()
+    # Only use the first 2 paragraphs for precision
+    summary = "\n".join(text.split("\n")[:4])
+    # Patterns to match
+    patterns = [
+        r"([a-z .'-]+?) (?:won|was elected|prevailed|defeated|beat|received the most votes|was the winner|was victorious|secured victory|was chosen as president|was chosen president)",
+        r"the winner (?:was|is) ([a-z .'-]+)",
+        r"([a-z .'-]+?) (?:and [a-z .'-]+)? won the election",
+        r"([a-z .'-]+?) (?:and [a-z .'-]+)? (?:defeated|beat) ([a-z .'-]+)"
+    ]
+    winners = set()
+    for pat in patterns:
+        for m in re.finditer(pat, summary):
+            # Add all groups except the loser in defeated/beat pattern
+            if len(m.groups()) == 2 and ("defeated" in pat or "beat" in pat):
+                winners.add(m.group(1).strip())
+            else:
+                for g in m.groups():
+                    winners.add(g.strip())
+    # Remove empty/short matches
+    winners = {w for w in winners if len(w) > 2}
+    return list(winners)
 
 def verify_politics(prediction: Dict[str, Any]) -> Dict[str, Any]:
     """
@@ -15,7 +44,7 @@ def verify_politics(prediction: Dict[str, Any]) -> Dict[str, Any]:
     Returns:
         Verification result
     """
-    subject = prediction.get("subject", "")
+    subject = prediction.get("subject", "").lower()
     obj = prediction.get("object", "")
     deadline = prediction.get("deadline", "")
     if not subject or not obj:
@@ -61,22 +90,45 @@ def verify_politics(prediction: Dict[str, Any]) -> Dict[str, Any]:
         data = resp.json()
         pages = data.get("query", {}).get("pages", {})
         extract = next(iter(pages.values())).get("extract", "")
-        # Check if the subject (candidate) is mentioned as the winner
         lower_extract = extract.lower()
-        if subject.lower() in lower_extract and ("won" in lower_extract or "winner" in lower_extract):
-            return {
-                "verdict": "true",
-                "confidence": 0.9,
-                "justification": f"{subject} is listed as the winner in Wikipedia for {obj}.",
-                "source": page_url
-            }
-        else:
+        winners = extract_winner_from_text(lower_extract)
+        # Check for withdrawal
+        withdrew = False
+        for sentence in lower_extract.split('.'):
+            if subject in sentence and any(word in sentence for word in ["withdrew", "dropped out", "suspended"]):
+                withdrew = True
+                break
+        if withdrew:
             return {
                 "verdict": "false",
-                "confidence": 0.7,
-                "justification": f"{subject} is not listed as the winner in Wikipedia for {obj}.",
+                "confidence": 0.9,
+                "justification": f"{prediction.get('subject')} withdrew or did not run in {obj}.",
                 "source": page_url
             }
+        # Check if subject is among the winners
+        for winner in winners:
+            if subject in winner:
+                return {
+                    "verdict": "true",
+                    "confidence": 0.95,
+                    "justification": f"{prediction.get('subject')} is listed as the winner in Wikipedia for {obj}.",
+                    "source": page_url
+                }
+        # If another winner is found, return false and mention them
+        if winners:
+            return {
+                "verdict": "false",
+                "confidence": 0.95,
+                "justification": f"{prediction.get('subject')} is not the winner. Winner(s): {', '.join(winners)}.",
+                "source": page_url
+            }
+        # Fallback: unknown
+        return {
+            "verdict": "unknown",
+            "confidence": 0.0,
+            "justification": f"Could not determine winner from Wikipedia for {obj}.",
+            "source": page_url
+        }
     except Exception as e:
         logger.error(f"Politics verifier failed: {e}")
         return {
